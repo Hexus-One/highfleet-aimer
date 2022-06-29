@@ -1,5 +1,9 @@
 # highfleet-aimer
-A program using computer vision to predict aiming in the game HighFleet.
+A program using computer vision to predict aiming in the game HighFleet. It's tuned for 180mm guns but it should more or less work for 130mm, 100mm and 57mm cannons.
+
+(The tracking is very dodgy, please help me do OpenCV stuff better)
+
+This only runs fast enough if you compile in Release mode (Debug is too slow to be useful)
 
 Be sure to run HighFleet in windowed mode (1920x1080). Hold left ctrl to auto aim.
 
