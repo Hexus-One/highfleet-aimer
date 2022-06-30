@@ -12,7 +12,7 @@ bool matIsEqual(const cv::Mat Mat1, const cv::Mat Mat2);
 
 int main(int, char **)
 {
-	const Scalar CV_BLACK = Scalar(0, 0, 0);
+	const Scalar CV_BLACK(0, 0, 0);
 	const Mat element = getStructuringElement(MORPH_RECT, Size(3, 3), Point(1, 1));
 
 	SetProcessDPIAware();
@@ -22,11 +22,17 @@ int main(int, char **)
 	Mat src, src1, src2, tmp1, tmp2, tmp3;
 	bool flipflop = true;
 
-	// video loop
 	int key = 0;
-	Point player_lastframe = Point(-1, -1);
-	Point enemy_lastframe = Point(-1, -1);
+	Point player_lastframe(-1, -1);
+	Point enemy_lastframe(-1, -1);
 
+	// used to keep a history of previous velocities computed, to smooth out tracking
+	// only use the most recent 10 frames (200ms) to calculate velocity
+	const uint HISTORY_SIZE = 10;
+	Point velocity_history[HISTORY_SIZE] = {};
+	bool velocity_valid[HISTORY_SIZE] = {};
+
+	// video loop
 	while (key != 27) // wait for escape key
 	{
 		// rudimentary way to check we're processing a unique frame
@@ -66,8 +72,8 @@ int main(int, char **)
 		int closest_diff = 10; // max tolerance of 10 pixels difference
 		int closest_i = -1;
 		int closest_player = INT_MAX;
-		Point player = Point(-1, -1);
-		Point enemy = Point(-1, -1);
+		Point player(-1, -1);
+		Point enemy(-1, -1);
 		for (size_t i = 0; i < contours.size(); i++)
 		{
 			RNG rng(i);
@@ -110,6 +116,14 @@ int main(int, char **)
 			circle(src, enemy, 10, Scalar(0, 0, 255), 2);
 		}
 
+		// shuffle the contents of velocity history
+		for (uint i = 0; i < HISTORY_SIZE - 1; i++)
+		{
+			velocity_history[i] = velocity_history[i + 1];
+			velocity_valid[i] = velocity_valid[i + 1];
+		}
+		velocity_valid[HISTORY_SIZE - 1] = false;
+
 		// do ballistics equations if position data is available for current and previous frame
 		// units in pixels per frame (px/fr) I guess
 		// 180mm velocity: 10 px/fr
@@ -117,55 +131,82 @@ int main(int, char **)
 		// then draw ideal angle on window for player
 		if (player.x != -1 && enemy.x != -1 && player_lastframe.x != -1 && enemy_lastframe.x != -1)
 		{
-			Point2f displacement = enemy - player;
-			Point2f velocity = (enemy - enemy_lastframe) - (player - player_lastframe);
-
-			// draw relative velocity
-			line(src, enemy, enemy + Point2i(velocity) * 50, Scalar(0, 255, 0), 2);
-
-			// funky ballistics equation time, see https://stackoverflow.com/questions/51851120/2d-target-intercept-algorithm
-			float dotproduct = velocity.dot(displacement);
-			int distsquared = displacement.x * displacement.x + displacement.y * displacement.y;
-			float u2 = velocity.x * velocity.x + velocity.y * velocity.y;
-			float v2 = 10 * 10; // using speed for 180mm ammo
-			float t = -1;		// collision time, initialised to invalid
-			float v2_u2 = v2 - u2;
-
-			if (u2 == v2)
+			Point displacement = enemy - player;
+			velocity_history[HISTORY_SIZE - 1] = (enemy - enemy_lastframe) - (player - player_lastframe);
+			// there's only so much acceleration that can happen - if the velocity between frames changes too much then we assume that it's the HUD moving around randomly
+			// check each pair of velocities and only validate them if they're close enough (max diff 2 pixels/frame in each axis)
+			for (uint i = 0; i < HISTORY_SIZE - 1; i++)
 			{
-				t = distsquared / (dotproduct * 2);
-			}
-			else
-			{
-				float discriminant = dotproduct * dotproduct + distsquared * v2_u2;
-
-				// real roots exist
-				if (discriminant > 0.0f)
+				if ((abs(velocity_history[i].x - velocity_history[i + 1].x) <= 2) &&
+					(abs(velocity_history[i].y - velocity_history[i + 1].y) <= 2))
 				{
-					float sqrtdisc = sqrt(discriminant);
-					// I have no clue whats happening here, but I guess its getting the smaller of both roots?
-					if (abs(dotproduct) < sqrtdisc)
-						t = (dotproduct + sqrtdisc) / v2_u2;
-					else if (dotproduct > 0.0f)
-						t = (dotproduct - sqrtdisc) / v2_u2;
+					velocity_valid[i] = true;
+					velocity_valid[i + 1] = true;
 				}
 			}
-
-			if (t != -1)
+			// then calculate the average velocity over the past HISTORY_SIZE frames, but only sum the valid velocities recorded
+			Point2f velocity(0, 0);
+			int valid_count = 0;
+			for (uint i = 0; i < HISTORY_SIZE; i++)
 			{
-				Point projectile = displacement + velocity * t;
-				// draw predicted collision location
-				cv::line(src, player, (projectile + player), Scalar(255, 255, 0), 1);
-
-				// move the mouse if left ctrl is held
-				if (GetAsyncKeyState(VK_LCONTROL) != 0)
+				if (velocity_valid[i])
 				{
-					RECT rc;
-					GetWindowRect(hwndHighFleet, &rc);
-					// center of screen according to game is here for some reason
-					int screenx = rc.left + 658 + projectile.x / 20;
-					int screeny = rc.top + 422 + projectile.y / 20;
-					MouseMove(screenx, screeny);
+					velocity += Point2f(velocity_history[i]);
+					valid_count++;
+				}
+			}
+			velocity /= valid_count;
+			// only continue if we have a valid velocity
+			if (valid_count != 0)
+			{
+
+				// draw relative velocity
+				line(src, enemy, enemy + Point2i(velocity * 50), Scalar(0, 255, 0), 2);
+
+				// funky ballistics equation time, see https://stackoverflow.com/questions/51851120/2d-target-intercept-algorithm
+				float dotproduct = velocity.dot(displacement);
+				int distsquared = displacement.x * displacement.x + displacement.y * displacement.y;
+				float u2 = velocity.x * velocity.x + velocity.y * velocity.y;
+				float v2 = 10 * 10; // using speed for 180mm ammo
+				float t = -1;		// collision time, initialised to invalid
+				float v2_u2 = v2 - u2;
+
+				if (u2 == v2)
+				{
+					t = distsquared / (dotproduct * 2);
+				}
+				else
+				{
+					float discriminant = dotproduct * dotproduct + distsquared * v2_u2;
+
+					// real roots exist
+					if (discriminant > 0.0f)
+					{
+						float sqrtdisc = sqrt(discriminant);
+						// I have no clue whats happening here, but I guess its getting the smaller of both roots?
+						if (abs(dotproduct) < sqrtdisc)
+							t = (dotproduct + sqrtdisc) / v2_u2;
+						else if (dotproduct > 0.0f)
+							t = (dotproduct - sqrtdisc) / v2_u2;
+					}
+				}
+
+				if (t != -1)
+				{
+					Point projectile = displacement + Point2i(velocity * t);
+					// draw predicted collision location
+					cv::line(src, player, (projectile + player), Scalar(255, 255, 0), 1);
+
+					// move the mouse if left ctrl is held
+					if (GetAsyncKeyState(VK_LCONTROL) != 0)
+					{
+						RECT rc;
+						GetWindowRect(hwndHighFleet, &rc);
+						// center of screen according to game is here for some reason
+						int screenx = rc.left + 658 + projectile.x / 10;
+						int screeny = rc.top + 422 + projectile.y / 10;
+						MouseMove(screenx, screeny);
+					}
 				}
 			}
 		}
@@ -180,7 +221,7 @@ int main(int, char **)
 		circle(src, Point(p.x, p.y), 10, Scalar(0, 255, 0));
 		**/
 
-		imshow("Preview", src);
+		cv::imshow("Preview", src);
 
 		// does this ordering matter? I have no clue
 		key = waitKey(1);
