@@ -8,6 +8,7 @@ using namespace cv;
 
 Mat hwnd2mat(HWND hwnd);
 void MouseMove(int x, int y);
+bool matIsEqual(const cv::Mat Mat1, const cv::Mat Mat2);
 
 int main(int, char **)
 {
@@ -18,7 +19,8 @@ int main(int, char **)
 	setUseOptimized(true);
 	auto hwndHighFleet = FindWindowEx(NULL, NULL, NULL, TEXT("HIGHFLEET v.1.151"));
 
-	Mat src, tmp1, tmp2, tmp3;
+	Mat src, src1, src2, tmp1, tmp2, tmp3;
+	bool flipflop = true;
 
 	// video loop
 	int key = 0;
@@ -27,7 +29,21 @@ int main(int, char **)
 
 	while (key != 27) // wait for escape key
 	{
-		src = hwnd2mat(hwndHighFleet);
+		// rudimentary way to check we're processing a unique frame
+		// basically alternate assigning the game screen to src1/2, then check if they're the same
+		if (flipflop = !flipflop)
+		{
+			src1 = hwnd2mat(hwndHighFleet);
+			src = src1;
+		}
+		else
+		{
+			src2 = hwnd2mat(hwndHighFleet);
+			src = src2;
+		}
+		if (matIsEqual(src1, src2))
+			continue;
+
 		tmp1 = src.clone();
 		// extractChannel(src, tmp1, 1); // optimisation: we only need the G channel
 		// black out the UI rectangles in the bottom left/right corners
@@ -35,12 +51,14 @@ int main(int, char **)
 		rectangle(tmp1, Point(1570, 780), Point(1919, 1079), CV_BLACK, FILLED);
 		// rectangle(tmp1, Point(928, 88), Point(989, 101), CV_BLACK, FILLED); // black out the "HONOR" text
 
-		// filter to valid green values
+		// filter to valid colour values
+		// hopefully this colour selection filters for the green-ish HUD/GUI overlay
 		inRange(tmp1, Scalar(0, 252, 0, 0), Scalar(254, 255, 255, 255), tmp2);
 		// remove small lines
 		morphologyEx(tmp2, tmp3, MORPH_OPEN, element);
 
-		// iterate through contours to find the player and enemy
+		// iterate through contours to find the player and enemy markers
+		// we rely on the big square for enemy, and engine heat bar for the player
 		vector<vector<Point>> contours;
 		vector<Vec4i> hierarchy;
 		findContours(tmp3, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE);
@@ -92,13 +110,6 @@ int main(int, char **)
 			circle(src, enemy, 10, Scalar(0, 0, 255), 2);
 		}
 
-		// skip processing if this is indentical to last frame
-		// I can't be bothered trying to sync the loop to the game FPS so I just check the frame is unique instead
-		if (player == player_lastframe || enemy == enemy_lastframe)
-		{
-			goto skipproc;
-		}
-
 		// do ballistics equations if position data is available for current and previous frame
 		// units in pixels per frame (px/fr) I guess
 		// 180mm velocity: 10 px/fr
@@ -108,6 +119,9 @@ int main(int, char **)
 		{
 			Point2f displacement = enemy - player;
 			Point2f velocity = (enemy - enemy_lastframe) - (player - player_lastframe);
+
+			// draw relative velocity
+			line(src, enemy, enemy + Point2i(velocity) * 50, Scalar(0, 255, 0), 2);
 
 			// funky ballistics equation time, see https://stackoverflow.com/questions/51851120/2d-target-intercept-algorithm
 			float dotproduct = velocity.dot(displacement);
@@ -140,6 +154,7 @@ int main(int, char **)
 			if (t != -1)
 			{
 				Point projectile = displacement + velocity * t;
+				// draw predicted collision location
 				cv::line(src, player, (projectile + player), Scalar(255, 255, 0), 1);
 
 				// move the mouse if left ctrl is held
@@ -157,8 +172,6 @@ int main(int, char **)
 
 		player_lastframe = player;
 		enemy_lastframe = enemy;
-
-	skipproc:
 
 		/**
 		POINT p;
@@ -240,4 +253,31 @@ void MouseMove(int x, int y)
 	Input.mi.dx = (long)fx;
 	Input.mi.dy = (long)fy;
 	SendInput(1, &Input, sizeof(INPUT));
+}
+
+// taken from https://stackoverflow.com/questions/9905093/how-to-check-whether-two-matrices-are-identical-in-opencv
+bool matIsEqual(const cv::Mat Mat1, const cv::Mat Mat2)
+{
+	if (Mat1.dims == Mat2.dims &&
+		Mat1.size == Mat2.size &&
+		Mat1.elemSize() == Mat2.elemSize())
+	{
+		if (Mat1.isContinuous() && Mat2.isContinuous())
+		{
+			return 0 == memcmp(Mat1.ptr(), Mat2.ptr(), Mat1.total() * Mat1.elemSize());
+		}
+		else
+		{
+			const cv::Mat *arrays[] = {&Mat1, &Mat2, 0};
+			uchar *ptrs[2];
+			cv::NAryMatIterator it(arrays, ptrs, 2);
+			for (unsigned int p = 0; p < it.nplanes; p++, ++it)
+				if (0 != memcmp(it.ptrs[0], it.ptrs[1], it.size * Mat1.elemSize()))
+					return false;
+
+			return true;
+		}
+	}
+
+	return false;
 }
